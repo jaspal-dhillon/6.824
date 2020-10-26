@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"log"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -18,6 +21,11 @@ import "sync"
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
+
+func init() {
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	rand.Seed(time.Now().UnixNano())
+}
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
@@ -60,27 +68,36 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
+	cfg.info("disconnect %d", leader1)
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
+	//cfg.info("Elected %d after disconnecting leader1", l2)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
+	cfg.info("connect %d", leader1)
 	leader2 := cfg.checkOneLeader()
+	//cfg.info("leader2 is %d", leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
+	cfg.info("disconnect %d", leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	cfg.info("disconnect %d", (leader2 + 1) % servers)
+	//cfg.info("disconnected %d and %d", leader2, (leader2+1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
+	cfg.info("connect %d", (leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
+	cfg.info("connect %d", leader2)
 	cfg.checkOneLeader()
 
 	cfg.end()
