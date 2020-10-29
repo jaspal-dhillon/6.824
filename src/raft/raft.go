@@ -54,7 +54,7 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-const RaftDebug = true
+const RaftDebug = false
 
 func (rf *Raft) dlog(format string, args ...interface{}) {
 	if ! RaftDebug {
@@ -141,6 +141,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// Optimization on page 8.
+	ConflictIndex int
+	ConflictTerm int
 }
 
 func min(a,b int) int {
@@ -192,6 +196,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if args.LeaderCommit > rf.commitIndex {
 				rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
 				rf.dlog("AE RPC handler: setting commitIndex to %d", rf.commitIndex)
+			}
+		} else {
+			if args.PrevLogIndex >= len(rf.log) {
+				reply.ConflictIndex = len(rf.log)
+				reply.ConflictTerm = -1
+			} else {
+				// PrevLogTerm at PrevLogIndex does not match.
+				// Return the first index of this term.
+				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+				var i int
+				for i = args.PrevLogIndex - 1 ; i >= 0; i-- {
+					if rf.log[i].Term != reply.ConflictTerm {
+						break
+					}
+				}
+				reply.ConflictIndex = i + 1
 			}
 		}
 	}
@@ -555,7 +575,22 @@ func (rf *Raft) sendHeartbeats() {
 							}
 						}
 					} else {
-						rf.nextIndex[id] = 0
+						if reply.ConflictTerm == -1 {
+							rf.nextIndex[id] = reply.ConflictIndex
+						} else {
+							var lastIndexTerm int = -1
+							for i := len(rf.log) -1 ; i >= 0; i-- {
+								if rf.log[i].Term == reply.ConflictTerm {
+									lastIndexTerm = i
+									break
+								}
+							}
+							if lastIndexTerm >= 0 {
+								rf.nextIndex[id] = lastIndexTerm + 1
+							} else {
+								rf.nextIndex[id] = reply.ConflictIndex
+							}
+						}
 					}
 				}
 			}

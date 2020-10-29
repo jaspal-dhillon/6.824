@@ -10,6 +10,7 @@ package raft
 
 import (
 	"log"
+	"runtime"
 	"testing"
 )
 import "fmt"
@@ -25,6 +26,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 func init() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	rand.Seed(time.Now().UnixNano())
+	runtime.GOMAXPROCS(8)
 }
 
 func TestInitialElection2A(t *testing.T) {
