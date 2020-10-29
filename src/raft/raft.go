@@ -1,22 +1,5 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
 import (
 	"bytes"
 	"fmt"
@@ -29,9 +12,6 @@ import (
 )
 import "sync/atomic"
 import "labrpc"
-
-// import "bytes"
-// import "labgob"
 
 const (
 	HeartbeatsInterval            = 50 * time.Millisecond
@@ -68,21 +48,20 @@ func (s RaftState) String() string {
 	}
 }
 
-//
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in Lab 3 you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh; at that point you can add fields to
-// ApplyMsg, but set CommandValid to false for these other uses.
-//
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+}
+
+const RaftDebug = true
+
+func (rf *Raft) dlog(format string, args ...interface{}) {
+	if ! RaftDebug {
+		return
+	}
+	format = fmt.Sprintf("[%d] ", rf.id) + format
+	log.Printf(format, args...)
 }
 
 //
@@ -112,11 +91,6 @@ type Raft struct {
 	matchIndex []int
 }
 
-func (rf *Raft) dlog(format string, args ...interface{}) {
-	format = fmt.Sprintf("[%d] ", rf.id) + format
-	log.Printf(format, args...)
-}
-
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -125,35 +99,22 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == Leader
 }
 
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.log)
-	// e.Encode(rf.yyy)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
 
-//
-// restore previously persisted state.
-//
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.votedFor = -1
 		rf.currentTerm = 0
 		return
 	}
-	// Your code here (2C).
-	// Example:
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm, votedFor int
@@ -166,13 +127,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log = log
 		rf.dlog("Loading currentTerm=%d votedFor=%d log=%v", currentTerm, votedFor, log)
 	}
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 }
 
 type AppendEntriesArgs struct {
@@ -218,10 +172,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			(args.PrevLogIndex < len(rf.log) && rf.log[args.PrevLogIndex].Term == args.PrevLogTerm) {
 			reply.Success = true
 
-			if len(rf.log) > args.PrevLogIndex + 1 {
-				rf.log = rf.log[0: args.PrevLogIndex+1]
+			logInsertIndex := args.PrevLogIndex + 1
+			newEntriesIndex := 0
+			for {
+				if newEntriesIndex >= len(args.Entries) || logInsertIndex >= len(rf.log) {
+					break
+				}
+				if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+					break
+				}
+				newEntriesIndex++
+				logInsertIndex++
 			}
-			rf.log = append(rf.log, args.Entries...)
+			if newEntriesIndex < len(args.Entries) {
+				rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+			}
 			rf.persist()
 			rf.dlog("AE RPC handler: new log=%+v LeaderCommit=%d commitIndex=%d", rf.log, args.LeaderCommit, rf.commitIndex)
 			if args.LeaderCommit > rf.commitIndex {
