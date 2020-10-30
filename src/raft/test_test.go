@@ -8,11 +8,7 @@ package raft
 // test with the original before submitting.
 //
 
-import (
-	"log"
-	"runtime"
-	"testing"
-)
+import "testing"
 import "fmt"
 import "time"
 import "math/rand"
@@ -22,12 +18,6 @@ import "sync"
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
-
-func init() {
-	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	rand.Seed(time.Now().UnixNano())
-	runtime.GOMAXPROCS(8)
-}
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
@@ -70,36 +60,27 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
-	cfg.info("disconnect %d", leader1)
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
-	//cfg.info("Elected %d after disconnecting leader1", l2)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
-	cfg.info("connect %d", leader1)
 	leader2 := cfg.checkOneLeader()
-	//cfg.info("leader2 is %d", leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
-	cfg.info("disconnect %d", leader2)
 	cfg.disconnect((leader2 + 1) % servers)
-	cfg.info("disconnect %d", (leader2 + 1) % servers)
-	//cfg.info("disconnected %d and %d", leader2, (leader2+1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	cfg.info("connect %d", (leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
-	cfg.info("connect %d", leader2)
 	cfg.checkOneLeader()
 
 	cfg.end()
@@ -113,7 +94,7 @@ func TestBasicAgree2B(t *testing.T) {
 	cfg.begin("Test (2B): basic agreement")
 
 	iters := 3
-	for index := 0; index < iters+1; index++ {
+	for index := 1; index < iters+1; index++ {
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
@@ -144,7 +125,7 @@ func TestRPCBytes2B(t *testing.T) {
 
 	iters := 10
 	var sent int64 = 0
-	for index := 1; index < iters+2; index++ {
+	for index := 2; index < iters+2; index++ {
 		cmd := randstring(5000)
 		xindex := cfg.one(cmd, servers, false)
 		if xindex != index {
@@ -216,8 +197,8 @@ func TestFailNoAgree2B(t *testing.T) {
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
 	}
-	if index != 1 {
-		t.Fatalf("expected index 1, got %v", index)
+	if index != 2 {
+		t.Fatalf("expected index 2, got %v", index)
 	}
 
 	time.Sleep(2 * RaftElectionTimeout)
@@ -239,7 +220,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
-	if index2 < 1 || index2 > 2 {
+	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
 
@@ -576,7 +557,6 @@ func TestPersist12C(t *testing.T) {
 
 	cfg.begin("Test (2C): basic persistence")
 
-	// index 0
 	cfg.one(11, servers, true)
 
 	// crash and re-start all
@@ -588,7 +568,6 @@ func TestPersist12C(t *testing.T) {
 		cfg.connect(i)
 	}
 
-	// index 1
 	cfg.one(12, servers, true)
 
 	leader1 := cfg.checkOneLeader()
@@ -596,27 +575,22 @@ func TestPersist12C(t *testing.T) {
 	cfg.start1(leader1)
 	cfg.connect(leader1)
 
-	// index 2
 	cfg.one(13, servers, true)
 
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-	// index 3, one disconnected
 	cfg.one(14, servers-1, true)
 	cfg.start1(leader2)
 	cfg.connect(leader2)
 
-	// should wait on index 3
-	cfg.wait(3, servers, -1) // wait for leader2 to join before killing i3
+	cfg.wait(4, servers, -1) // wait for leader2 to join before killing i3
 
 	i3 := (cfg.checkOneLeader() + 1) % servers
 	cfg.disconnect(i3)
-	// index 4
 	cfg.one(15, servers-1, true)
 	cfg.start1(i3)
 	cfg.connect(i3)
 
-	// index 5
 	cfg.one(16, servers, true)
 
 	cfg.end()
@@ -969,7 +943,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 	lastIndex := cfg.one(rand.Int(), servers, true)
 
 	really := make([]int, lastIndex+1)
-	for index := 0; index < lastIndex; index++ {
+	for index := 1; index <= lastIndex; index++ {
 		v := cfg.wait(index, servers, -1)
 		if vi, ok := v.(int); ok {
 			really = append(really, vi)
