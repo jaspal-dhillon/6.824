@@ -208,11 +208,7 @@ func (rf *Raft) sendHeartbeats() {
 			rf.mu.Lock()
 			ni := rf.nextIndex[id]
 			leaderCommit := rf.commitIndex
-			if len(rf.log) > ni {
-				entries = rf.log[ni:]
-			} else {
-				entries = rf.log[0:0]
-			}
+			entries = rf.log[ni:]
 			if ni > 0 {
 				prevLogIndex = ni - 1
 				prevLogTerm = rf.log[prevLogIndex].Term
@@ -239,7 +235,6 @@ func (rf *Raft) sendHeartbeats() {
 					if reply.Success {
 						rf.nextIndex[id] = ni + len(entries)
 						rf.matchIndex[id] = rf.nextIndex[id] - 1
-						// do we need to increment commitIndex ? check now
 						savedCommit := rf.commitIndex
 						for i := savedCommit + 1; i < len(rf.log); i++ {
 							if rf.log[i].Term == savedTerm {
@@ -259,6 +254,7 @@ func (rf *Raft) sendHeartbeats() {
 							}
 						}
 					} else {
+						// Optmization mentioned on Page 8 of the paper.
 						if reply.ConflictTerm == -1 {
 							rf.nextIndex[id] = reply.ConflictIndex
 						} else {
