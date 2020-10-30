@@ -22,6 +22,7 @@ const (
 type Log struct {
 	Command interface{}
 	Term    int
+	Noop    bool
 }
 
 type RaftState int
@@ -57,7 +58,7 @@ type ApplyMsg struct {
 const RaftDebug = false
 
 func (rf *Raft) dlog(format string, args ...interface{}) {
-	if ! RaftDebug {
+	if !RaftDebug {
 		return
 	}
 	format = fmt.Sprintf("[%d] ", rf.id) + format
@@ -144,10 +145,10 @@ type AppendEntriesReply struct {
 
 	// Optimization on page 8.
 	ConflictIndex int
-	ConflictTerm int
+	ConflictTerm  int
 }
 
-func min(a,b int) int {
+func min(a, b int) int {
 	if a < b {
 		return a
 	}
@@ -194,7 +195,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.persist()
 			rf.dlog("AE RPC handler: new log=%+v LeaderCommit=%d commitIndex=%d", rf.log, args.LeaderCommit, rf.commitIndex)
 			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+				rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 				rf.dlog("AE RPC handler: setting commitIndex to %d", rf.commitIndex)
 			}
 		} else {
@@ -206,7 +207,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// Return the first index of this term.
 				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
 				var i int
-				for i = args.PrevLogIndex - 1 ; i >= 0; i-- {
+				for i = args.PrevLogIndex - 1; i >= 0; i-- {
 					if rf.log[i].Term != reply.ConflictTerm {
 						break
 					}
@@ -439,10 +440,10 @@ func (rf *Raft) startElection() {
 		}
 		go func(id int) {
 			args := RequestVoteArgs{
-				Term:        savedCurrentTerm,
-				CandidateID: rf.id,
+				Term:         savedCurrentTerm,
+				CandidateID:  rf.id,
 				LastLogIndex: lastIndex,
-				LastLogTerm: lastTerm,
+				LastLogTerm:  lastTerm,
 			}
 			reply := RequestVoteReply{}
 			rf.dlog("sending RequestVote to %d: %+v", id, args)
@@ -484,6 +485,11 @@ func (rf *Raft) startLeader() {
 		rf.nextIndex[peer] = len(rf.log)
 		rf.matchIndex[peer] = -1
 	}
+	// Add one no-op command, to commit everything from previous terms
+	rf.log = append(rf.log, Log{
+		Term: rf.currentTerm,
+		Noop: true,
+	})
 	rf.dlog("becomes Leader; term=%d, log=%v", rf.currentTerm, rf.log)
 
 	go func() {
@@ -536,12 +542,12 @@ func (rf *Raft) sendHeartbeats() {
 			rf.mu.Unlock()
 
 			args := AppendEntriesArgs{
-				Term:     savedTerm,
-				LeaderId: rf.id,
+				Term:         savedTerm,
+				LeaderId:     rf.id,
 				LeaderCommit: leaderCommit,
-				Entries: entries,
+				Entries:      entries,
 				PrevLogIndex: prevLogIndex,
-				PrevLogTerm: prevLogTerm,
+				PrevLogTerm:  prevLogTerm,
 			}
 			var reply AppendEntriesReply
 			rf.dlog("sending AppendEntries to %v: ni=%d, args=%+v", id, ni, args)
@@ -579,7 +585,7 @@ func (rf *Raft) sendHeartbeats() {
 							rf.nextIndex[id] = reply.ConflictIndex
 						} else {
 							var lastIndexTerm int = -1
-							for i := len(rf.log) -1 ; i >= 0; i-- {
+							for i := len(rf.log) - 1; i >= 0; i-- {
 								if rf.log[i].Term == reply.ConflictTerm {
 									lastIndexTerm = i
 									break
@@ -621,6 +627,9 @@ func (rf *Raft) updateApplyChan() {
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 		for index, entry := range logCopy {
+			if entry.Noop {
+				continue
+			}
 			rf.applyCh <- ApplyMsg{
 				Command:      entry.Command,
 				CommandIndex: lastAppliedIndex + index,
