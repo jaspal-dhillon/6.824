@@ -476,6 +476,10 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	return -1
 }
 
+func (cfg *config) info(format string, args ...interface{}) {
+	log.Printf("[TEST] " + format + "\n", args...)
+}
+
 // start a Test.
 // print the Test message.
 // e.g. cfg.begin("Test (2B): RPC counts aren't too high")

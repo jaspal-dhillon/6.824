@@ -1,47 +1,53 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
-import "sync"
-import "sync/atomic"
+import (
+	"sync"
+	"time"
+)
 import "labrpc"
 
-// import "bytes"
-// import "labgob"
+const (
+	HeartbeatsInterval            = 50 * time.Millisecond
+	MinimumElectionTimeout        = time.Duration(150) * time.Millisecond
+	RandomElectionTimeoutInterval = 400
+)
 
+type Log struct {
+	Command interface{}
+	Term    int
+	Noop    bool
+}
 
+type RaftState int
 
-//
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in Lab 3 you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh; at that point you can add fields to
-// ApplyMsg, but set CommandValid to false for these other uses.
-//
+const (
+	Follower RaftState = iota
+	Candidate
+	Leader
+	Dead
+)
+
+func (s RaftState) String() string {
+	switch s {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	case Dead:
+		return "Dead"
+	default:
+		panic("InvalidState")
+	}
+}
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
 }
+
 
 //
 // A Go object implementing a single Raft peer.
@@ -50,124 +56,25 @@ type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	id        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	applyCh   chan<- ApplyMsg     // to notify tester that this Raft peer has committed a log entry
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	// Persistent Raft state on all servers
+	currentTerm int
+	votedFor    int
+	log         []Log
 
+	// Volatile state on all servers
+	commitIndex        int
+	lastApplied        int
+	state              RaftState
+	electionResetEvent time.Time
+
+	// Volatile state on all leaders
+	nextIndex  []int
+	matchIndex []int
 }
-
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
-}
-
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-}
-
-
-//
-// restore previously persisted state.
-//
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-}
-
-
-
-
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-}
-
-//
-// example RequestVote RPC handler.
-//
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-}
-
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -184,41 +91,28 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-
-	return index, term, isLeader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.dlog("Submit received by %v: %v", rf.state, command)
+	if rf.state != Leader {
+		return -1, -1, false
+	}
+	rf.log = append(rf.log, Log{
+		Command: command,
+		Term:    rf.currentTerm,
+		Noop:    false,
+	})
+	rf.persist()
+	lastIndex, lastTerm := rf.getLastIndexAndTerm()
+	rf.dlog("leader log=%v, returning %d %d", rf.log, lastIndex, lastTerm)
+	return lastIndex, lastTerm, true
 }
 
-//
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-//
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-}
-
-func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
-}
 
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
-// server's port is peers[me]. all the servers' peers[] arrays
+// server's port is peers[id]. all the servers' peers[] arrays
 // have the same order. persister is a place for this server to
 // save its persistent state, and also initially holds the most
 // recent saved state, if any. applyCh is a channel on which the
@@ -231,13 +125,193 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
-	rf.me = me
+	rf.id = me
+	rf.applyCh = applyCh
 
-	// Your initialization code here (2A, 2B, 2C).
+	rf.state = Follower
+	rf.votedFor = -1
+	rf.lastApplied = -1
+	rf.commitIndex = -1
+	rf.electionResetEvent = time.Now()
 
-	// initialize from state persisted before a crash
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
 	rf.readPersist(persister.ReadRaftState())
 
+	go rf.runElectionTimer()
+	go rf.updateApplyChan()
 
 	return rf
+}
+
+
+// Expect rf.mu to be Locked
+func (rf *Raft) startLeader() {
+	rf.state = Leader
+
+	for peer := range rf.peers {
+		rf.nextIndex[peer] = len(rf.log)
+		rf.matchIndex[peer] = -1
+	}
+	rf.dlog("becomes Leader; term=%d, log=%v", rf.currentTerm, rf.log)
+
+	// Add one no-op command, to commit everything from previous terms, as
+	// mentioned in Section 8 of the paper.
+	// The tester (config.go:L194) can't deal with this condition, it expects
+	// all logs to be continous, starting from index 1. So, we'll just add a log
+	// in case leader starts with empty log.
+	if len(rf.log) == 0 {
+		rf.log = append(rf.log, Log{
+			Command: nil,
+			Term: rf.currentTerm,
+			Noop: true,
+		})
+		rf.persist()
+	}
+
+	go func() {
+		ticker := time.NewTicker(HeartbeatsInterval)
+		defer ticker.Stop()
+		for {
+			rf.sendHeartbeats()
+			<-ticker.C
+
+			rf.mu.Lock()
+			if rf.state != Leader || rf.killed(){
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+		}
+	}()
+}
+
+// one round of heartbeats
+func (rf *Raft) sendHeartbeats() {
+	rf.mu.Lock()
+	savedTerm := rf.currentTerm
+	rf.mu.Unlock()
+
+	//rf.dlog("Sending out heartbeats..")
+	for peer := range rf.peers {
+		if peer == rf.id {
+			continue
+		}
+		go func(id int) {
+			var entries []Log
+			var prevLogIndex, prevLogTerm int
+			prevLogIndex = -1
+			prevLogTerm = -1
+			// in each heartbeat, figure out the new log entries and add them
+			// need to lock the rf.mu Lock to read these entries
+			rf.mu.Lock()
+			ni := rf.nextIndex[id]
+			leaderCommit := rf.commitIndex
+			entries = rf.log[ni:]
+			if ni > 0 {
+				prevLogIndex = ni - 1
+				prevLogTerm = rf.log[prevLogIndex].Term
+			}
+			rf.mu.Unlock()
+
+			args := AppendEntriesArgs{
+				Term:         savedTerm,
+				LeaderId:     rf.id,
+				LeaderCommit: leaderCommit,
+				Entries:      entries,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+			}
+			var reply AppendEntriesReply
+			rf.dlog("sending AppendEntries to %v: ni=%d, args=%+v", id, ni, args)
+			if ok := rf.sendAppendEntries(id, &args, &reply); ok {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if reply.Term > savedTerm {
+					rf.becomeFollower(reply.Term)
+				}
+				if rf.state == Leader && reply.Term == savedTerm {
+					if reply.Success {
+						rf.nextIndex[id] = ni + len(entries)
+						rf.matchIndex[id] = rf.nextIndex[id] - 1
+						savedCommit := rf.commitIndex
+						for i := savedCommit + 1; i < len(rf.log); i++ {
+							if rf.log[i].Term == savedTerm {
+								matches := 1
+								for peer := range rf.peers {
+									if peer == rf.id {
+										continue
+									}
+									if rf.matchIndex[peer] >= i {
+										matches++
+									}
+								}
+								if matches*2 > len(rf.peers) {
+									rf.dlog("setting leader commitIndex to %d", i)
+									rf.commitIndex = i
+								}
+							}
+						}
+					} else {
+						// Optmization mentioned on Page 8 of the paper.
+						if reply.ConflictTerm == -1 {
+							rf.nextIndex[id] = reply.ConflictIndex
+						} else {
+							var lastIndexTerm int = -1
+							for i := len(rf.log) - 1; i >= 0; i-- {
+								if rf.log[i].Term == reply.ConflictTerm {
+									lastIndexTerm = i
+									break
+								}
+							}
+							if lastIndexTerm >= 0 {
+								rf.nextIndex[id] = lastIndexTerm + 1
+							} else {
+								rf.nextIndex[id] = reply.ConflictIndex
+							}
+						}
+					}
+				}
+			}
+		}(peer)
+	}
+}
+
+// function to act on committed entries and send them on the applyCh channel
+func (rf *Raft) updateApplyChan() {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		if rf.killed() {
+			return
+		}
+		rf.mu.Lock()
+		if rf.commitIndex < rf.lastApplied {
+			panic("should have never happened")
+		}
+		// no entries to process
+		if rf.commitIndex == rf.lastApplied {
+			rf.mu.Unlock()
+			continue
+		}
+		// some committed entries need to be sent
+
+		logCopy := rf.log[rf.lastApplied+1 : rf.commitIndex+1]
+		rf.dlog("sending out entries %+v on applyCh", logCopy)
+		lastAppliedIndex := rf.lastApplied + 1
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
+		for index, entry := range logCopy {
+			if entry.Noop {
+				continue
+			}
+			rf.applyCh <- ApplyMsg{
+				Command:      entry.Command,
+				CommandIndex: lastAppliedIndex + index,
+				CommandValid: true,
+			}
+		}
+	}
 }
