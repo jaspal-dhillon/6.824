@@ -28,6 +28,12 @@ type Op struct {
 	ClientID  int64
 }
 
+type Result struct {
+	Op
+	raft.ApplyMsg
+	ResultValue string
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -36,7 +42,7 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	data        map[string]string
-	idToChannel map[int64]chan raft.ApplyMsg // after submitting a command, which channel to watch on
+	idToChannel map[int]chan Result // after submitting a command, which channel to watch on
 	ack         map[int64]int64
 
 	maxraftstate int // snapshot if log grows this big
@@ -54,21 +60,21 @@ func (kv *KVServer) GetLeaderAndTerm(args *GetLeaderArgs, reply *GetLeaderReply)
 	return
 }
 
-func (kv *KVServer) processOp(op Op) (err Err) {
-	var targetChannel chan raft.ApplyMsg
+func (kv *KVServer) processOp(op Op) (Result, Err) {
+	var targetChannel chan Result
+	var ok bool
 	kv.dlog("Processing op %+v", op)
-	kv.mu.Lock()
 	kv.dlog("Submitting op %+v to Start()", op)
 	expectedIndex, expectedTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		kv.dlog("is not the leader")
-		err = ErrWrongLeader
-		return
+		return Result{}, ErrWrongLeader
 	}
-	targetChannel, ok := kv.idToChannel[op.RequestID]
+	kv.mu.Lock()
+	targetChannel, ok = kv.idToChannel[expectedIndex]
 	if ! ok {
-		targetChannel = make(chan raft.ApplyMsg)
-		kv.idToChannel[op.RequestID] = targetChannel
+		targetChannel = make(chan Result)
+		kv.idToChannel[expectedIndex] = targetChannel
 	}
 	kv.dlog("releasing lock for op %+v", op)
 	kv.mu.Unlock()
@@ -79,7 +85,7 @@ func (kv *KVServer) processOp(op Op) (err Err) {
 	// 2. If the index matches but not the command, this Server is no longer leader, return failure
 	// 3. If command and index match, process the command.
 	// A timeout (of this Server waiting for Raft) may also occur and needs to be taken care of.
-	var msg raft.ApplyMsg
+	var msg Result
 	timeout := make(chan int)
 	go func() {
 		time.Sleep(RaftTimeout)
@@ -91,27 +97,23 @@ func (kv *KVServer) processOp(op Op) (err Err) {
 		kv.dlog("Received %+v on the channel", msg)
 		currentTerm, isLeader := kv.rf.GetState()
 		if currentTerm != expectedTerm || !isLeader {
-			err = ErrTermMismatch
-			return
+			return Result{}, ErrTermMismatch
 		}
 		if msg.CommandIndex != expectedIndex {
-			err = ErrIndexSkipped
-			return
+			return Result{}, ErrIndexSkipped
 		}
 		// If this is the expected index but we got a different command from Raft Leader,
 		// we need to submit again.
 		returnedOp := msg.Command.(Op)
 		if returnedOp != op {
-			err = ErrDiffCmdSameIndex
-			return
+			return Result{}, ErrDiffCmdSameIndex
 		}
-		err = OK
 	case <-timeout:
 		kv.dlog("Op %+v timed out..", op)
 		// we failed to get any response at all from the Raft cluster, retry with a new leader
-		err = ErrRaftTimeout
+		return Result{}, ErrRaftTimeout
 	}
-	return err
+	return msg, OK
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -121,14 +123,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		RequestID: args.RequestID,
 		ClientID:  args.ClientID,
 	}
-	if err := kv.processOp(op); err == OK {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		val, ok := kv.data[op.Key]
-		if !ok {
-			val = ""
-		}
-		reply.Value = val
+	if result, err := kv.processOp(op); err == OK {
+		reply.Value = result.ResultValue
 		reply.Err = OK
 	} else {
 		reply.Err = err
@@ -151,7 +147,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if args.Op == "Append" {
 		op.OpType = AppendOp
 	}
-	reply.Err = kv.processOp(op)
+	_, reply.Err = kv.processOp(op)
 	return
 }
 
@@ -208,7 +204,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.data = make(map[string]string)
 	kv.ack = make(map[int64]int64)
-	kv.idToChannel = make(map[int64]chan raft.ApplyMsg)
+	kv.idToChannel = make(map[int]chan Result)
 
 	kv.applyCh = make(chan raft.ApplyMsg, 100)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -228,15 +224,16 @@ func (kv *KVServer) watchForApplyCh() {
 			kv.mu.Lock()
 			kv.dlog("acquired the lock for msg %+v..", msg)
 			op := msg.Command.(Op)
-			kv.applyOp(op)
-			channel, present := kv.idToChannel[op.RequestID]
+			result := kv.applyOp(op)
+			result.ApplyMsg = msg
+			channel, present := kv.idToChannel[msg.CommandIndex]
 			if present {
 				kv.dlog("sending to the channel..")
 				// If this applyCh message comes in after RPC handler of the same request times out,
 				// then no one is listening on this channel and this statement will block.
 				// Need to provide a default case for this scenario.
 				select {
-				case channel <- msg:
+				case channel <- result:
 				default:
 					kv.dlog("unable to send to channel..")
 				}
@@ -257,13 +254,21 @@ func (kv *KVServer) dedup(op Op) bool {
 	return false
 }
 
-func (kv *KVServer) applyOp(op Op) {
-	if kv.dedup(op) {
-		return
-	}
+func (kv *KVServer) applyOp(op Op) Result {
+	var result Result
+	result.Op = op
 	switch op.OpType {
 	case GetOp:
+		oldval, oldok := kv.data[op.Key]
+		if oldok {
+			result.ResultValue = oldval
+		} else {
+			result.ResultValue = ""
+		}
 	default:
+		if kv.dedup(op) {
+			return result
+		}
 		oldval, oldok := kv.data[op.Key]
 		if !oldok {
 			oldval = ""
@@ -274,4 +279,5 @@ func (kv *KVServer) applyOp(op Op) {
 			kv.data[op.Key] = oldval + op.Value
 		}
 	}
+	return result
 }
