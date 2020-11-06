@@ -1,9 +1,35 @@
 package kvraft
 
+import (
+	"fmt"
+	"log"
+)
+
+const KVDebug = false
+
+func (ck *Clerk) dlog(format string, args ...interface{}) {
+	if !KVDebug {
+		return
+	}
+	format = fmt.Sprintf("[CLERK %p] ", ck) + format
+	log.Printf(format, args...)
+}
+
+func (kv *KVServer) dlog(format string, args ...interface{}) {
+	if !KVDebug {
+		return
+	}
+	format = fmt.Sprintf("[KVServer %d] ", kv.me) + format
+	log.Printf(format, args...)
+}
+
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK                  = "OK"
+	ErrRaftTimeout      = "ErrRaftTimeout"
+	ErrWrongLeader      = "ErrWrongLeader"
+	ErrIndexSkipped     = "ErrIndexSkipped"
+	ErrDiffCmdSameIndex = "ErrDiffCmdSameIndex"
+	ErrTermMismatch     = "ErrTermMismatch"
 )
 
 type Err string
@@ -13,9 +39,8 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	RequestID int64
+	ClientID	int64
 }
 
 type PutAppendReply struct {
@@ -24,10 +49,19 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
-	// You'll have to add definitions here.
+	RequestID int64
+	ClientID	int64
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type GetLeaderArgs struct {
+}
+
+type GetLeaderReply struct {
+	Err         Err
+	CurrentTerm int
 }
