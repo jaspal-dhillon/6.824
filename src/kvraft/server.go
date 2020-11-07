@@ -63,44 +63,36 @@ func (kv *KVServer) GetLeaderAndTerm(args *GetLeaderArgs, reply *GetLeaderReply)
 func (kv *KVServer) processOp(op Op) (Result, Err) {
 	var targetChannel chan Result
 	var ok bool
-	kv.dlog("Processing op %+v", op)
-	kv.dlog("Submitting op %+v to Start()", op)
+
 	expectedIndex, expectedTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		kv.dlog("is not the leader")
 		return Result{}, ErrWrongLeader
 	}
+
 	kv.mu.Lock()
 	targetChannel, ok = kv.idToChannel[expectedIndex]
 	if ! ok {
 		targetChannel = make(chan Result)
 		kv.idToChannel[expectedIndex] = targetChannel
 	}
-	kv.dlog("releasing lock for op %+v", op)
 	kv.mu.Unlock()
 
 	// Now we need to wait for this Op to appear on the applyCh channel
 	// Once we receive some Op, we need to check the following:
-	// 1. If this command's index is what we expect, if not, we feed it back into the applyCh
-	// 2. If the index matches but not the command, this Server is no longer leader, return failure
-	// 3. If command and index match, process the command.
-	// A timeout (of this Server waiting for Raft) may also occur and needs to be taken care of.
+	// : If the index matches but not the command, this Server is no longer leader, return failure.
+	// : If command and index match, process the command.
+	// : A timeout (of this Server waiting for Raft) may also occur and needs to be taken care of.
 	var msg Result
 	timeout := make(chan int)
 	go func() {
 		time.Sleep(RaftTimeout)
 		close(timeout)
 	}()
-	kv.dlog("Now waiting on the targetchannel for op %+v", op)
 	select {
 	case msg = <-targetChannel:
-		kv.dlog("Received %+v on the channel", msg)
 		currentTerm, isLeader := kv.rf.GetState()
 		if currentTerm != expectedTerm || !isLeader {
 			return Result{}, ErrTermMismatch
-		}
-		if msg.CommandIndex != expectedIndex {
-			return Result{}, ErrIndexSkipped
 		}
 		// If this is the expected index but we got a different command from Raft Leader,
 		// we need to submit again.
@@ -109,7 +101,6 @@ func (kv *KVServer) processOp(op Op) (Result, Err) {
 			return Result{}, ErrDiffCmdSameIndex
 		}
 	case <-timeout:
-		kv.dlog("Op %+v timed out..", op)
 		// we failed to get any response at all from the Raft cluster, retry with a new leader
 		return Result{}, ErrRaftTimeout
 	}
@@ -190,12 +181,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-	labgob.Register(GetLeaderArgs{})
-	labgob.Register(GetLeaderReply{})
-	labgob.Register(GetArgs{})
-	labgob.Register(GetReply{})
-	labgob.Register(PutAppendArgs{})
-	labgob.Register(PutAppendReply{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -222,24 +207,19 @@ func (kv *KVServer) watchForApplyCh() {
 		select {
 		case msg := <-kv.applyCh:
 			kv.mu.Lock()
-			kv.dlog("acquired the lock for msg %+v..", msg)
 			op := msg.Command.(Op)
 			result := kv.applyOp(op)
 			result.ApplyMsg = msg
 			channel, present := kv.idToChannel[msg.CommandIndex]
 			if present {
-				kv.dlog("sending to the channel..")
 				// If this applyCh message comes in after RPC handler of the same request times out,
 				// then no one is listening on this channel and this statement will block.
 				// Need to provide a default case for this scenario.
 				select {
 				case channel <- result:
 				default:
-					kv.dlog("unable to send to channel..")
 				}
-				kv.dlog("out of select...")
 			}
-			kv.dlog("releasing the lock for msg %+v...", msg)
 			kv.mu.Unlock()
 		}
 	}
@@ -257,21 +237,18 @@ func (kv *KVServer) dedup(op Op) bool {
 func (kv *KVServer) applyOp(op Op) Result {
 	var result Result
 	result.Op = op
+	oldval, oldok := kv.data[op.Key]
+	if oldok {
+		result.ResultValue = oldval
+	} else {
+		oldval = ""
+	}
 	switch op.OpType {
 	case GetOp:
-		oldval, oldok := kv.data[op.Key]
-		if oldok {
-			result.ResultValue = oldval
-		} else {
-			result.ResultValue = ""
-		}
+		result.ResultValue = oldval
 	default:
 		if kv.dedup(op) {
 			return result
-		}
-		oldval, oldok := kv.data[op.Key]
-		if !oldok {
-			oldval = ""
 		}
 		if op.OpType == PutOp {
 			kv.data[op.Key] = op.Value

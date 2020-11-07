@@ -47,11 +47,9 @@ func (ck *Clerk) findTermAndLeader() {
 			ok := ck.servers[i].Call("KVServer.GetLeaderAndTerm", &GetLeaderArgs{}, &getLeaderReply)
 			if ok && getLeaderReply.Err == OK {
 				ck.currentLeader = i
-				ck.dlog("Current Leader is %d", i)
 				return
 			}
 		}
-		ck.dlog("Unable to find current leader, will try in 500 milliseconds")
 		time.Sleep(time.Millisecond * 500)
 	}
 }
@@ -114,7 +112,6 @@ func (ck *Clerk) makeRPC(rpcName string, args interface{}, reply interface{}) {
 	}
 	for {
 		var err Err = OK
-		ck.dlog("Submitting RPC %s with args %+v", rpcName, args)
 		ok := ck.servers[ck.currentLeader].Call(rpcName, args, reply)
 		if ok {
 			switch rpcName {
