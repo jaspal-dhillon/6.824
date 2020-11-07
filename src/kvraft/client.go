@@ -16,10 +16,9 @@ const (
 type Clerk struct {
 	servers       []*labrpc.ClientEnd
 	currentLeader int
-	clientID	int64
+	clientID      int64
+	lastRequestID int64
 }
-
-var counter int64
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
@@ -28,8 +27,8 @@ func nrand() int64 {
 	return x
 }
 
-func nextId() int64 {
-	return atomic.AddInt64(&counter, 1)
+func (ck *Clerk) nextRequestId() int64 {
+	return atomic.AddInt64(&ck.lastRequestID, 1)
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -68,9 +67,9 @@ func (ck *Clerk) findTermAndLeader() {
 //
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
-		Key: key,
-		RequestID:  nextId(),
-		ClientID: ck.clientID,
+		Key:       key,
+		RequestID: ck.nextRequestId(),
+		ClientID:  ck.clientID,
 	}
 	var reply GetReply
 	ck.makeRPC(GetRPCName, &args, &reply)
@@ -89,11 +88,11 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
-		RequestID:  nextId(),
-		ClientID: ck.clientID,
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		RequestID: ck.nextRequestId(),
+		ClientID:  ck.clientID,
 	}
 	var reply PutAppendReply
 	ck.makeRPC(PutAppendRPCName, &args, &reply)

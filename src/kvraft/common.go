@@ -27,7 +27,6 @@ const (
 	OK                  = "OK"
 	ErrRaftTimeout      = "ErrRaftTimeout"
 	ErrWrongLeader      = "ErrWrongLeader"
-	ErrIndexSkipped     = "ErrIndexSkipped"
 	ErrDiffCmdSameIndex = "ErrDiffCmdSameIndex"
 	ErrTermMismatch     = "ErrTermMismatch"
 )
@@ -36,11 +35,11 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
+	Key       string
+	Value     string
+	Op        string // "Put" or "Append"
 	RequestID int64
-	ClientID	int64
+	ClientID  int64
 }
 
 type PutAppendReply struct {
@@ -48,9 +47,9 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
+	Key       string
 	RequestID int64
-	ClientID	int64
+	ClientID  int64
 }
 
 type GetReply struct {

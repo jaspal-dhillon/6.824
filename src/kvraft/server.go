@@ -71,7 +71,7 @@ func (kv *KVServer) processOp(op Op) (Result, Err) {
 
 	kv.mu.Lock()
 	targetChannel, ok = kv.idToChannel[expectedIndex]
-	if ! ok {
+	if !ok {
 		targetChannel = make(chan Result)
 		kv.idToChannel[expectedIndex] = targetChannel
 	}
