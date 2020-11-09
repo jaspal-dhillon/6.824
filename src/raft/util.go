@@ -18,6 +18,7 @@ func (rf *Raft) dlog(format string, args ...interface{}) {
 	format = fmt.Sprintf("[%d] ", rf.id) + format
 	log.Printf(format, args...)
 }
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -26,14 +27,37 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == Leader
 }
 
-func (rf *Raft) persist() {
+func (rf *Raft) SaveSnapshot(serverData []byte, lastIncludedIndex int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// We will truncate all logs from starting till the lastIncludedIndex
+	// Then update the rf.lastInitial{Index,Term}
+	// Then save the Raft and Server data to persistent storage aka persister.
+	oldlen := len(rf.log)
+	olds := lastIncludedIndex-(rf.lastLogInitialIndex+1)
+	rf.lastLogInitialTerm = rf.log[(lastIncludedIndex - (rf.lastLogInitialIndex + 1))].Term
+	rf.log = rf.log[(lastIncludedIndex-(rf.lastLogInitialIndex+1))+1:]
+	rf.lastLogInitialIndex = lastIncludedIndex
+	rf.persister.SaveStateAndSnapshot(rf.getRaftData(), serverData)
+	rf.dlog("old len of log = %d, new len = %d, new initial index %d term %d" +
+		" logs truncated from %d", oldlen, len(rf.log),
+		lastIncludedIndex, rf.lastLogInitialTerm, olds)
+	// Snapshot saved successfully!
+}
+
+func (rf *Raft) getRaftData() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	e.Encode(rf.lastLogInitialIndex)
+	e.Encode(rf.lastLogInitialTerm)
+	return w.Bytes()
+}
+
+func (rf *Raft) persist() {
+	rf.persister.SaveRaftState(rf.getRaftData())
 }
 
 func (rf *Raft) readPersist(data []byte) {
@@ -44,16 +68,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var currentTerm, votedFor int
+	var currentTerm, votedFor, lastInitialTerm, lastInitialIndex int
 	var log []Log
-	if d.Decode(&votedFor) != nil || d.Decode(&currentTerm) != nil || d.Decode(&log) != nil {
+	if d.Decode(&votedFor) != nil || d.Decode(&currentTerm) != nil || d.Decode(&log) != nil || d.Decode(&lastInitialIndex) != nil || d.Decode(&lastInitialTerm) != nil {
 		panic("Decoding error..")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
-		rf.dlog("Loading currentTerm=%d votedFor=%d log=%v", currentTerm, votedFor, log)
+		rf.lastLogInitialIndex = lastInitialIndex
+		rf.lastLogInitialTerm = lastInitialTerm
+		rf.commitIndex = lastInitialIndex
+		rf.lastApplied = lastInitialIndex
+		rf.dlog("Loading currentTerm=%d votedFor=%d commitIndex=%d", currentTerm, votedFor, lastInitialIndex)
 	}
+	// Also adjust lastTerm, lastIndex for AppendEntry RPC consistency check.
 }
 
 func min(a, b int) int {
@@ -74,15 +103,18 @@ func (rf *Raft) becomeFollower(Term int) {
 	go rf.runElectionTimer()
 }
 
-
 // expect rf.mu to be Locked
 func (rf *Raft) getLastIndexAndTerm() (int, int) {
 	if len(rf.log) > 0 {
 		lastIndex := len(rf.log) - 1
 		lastTerm := rf.log[lastIndex].Term
-		return lastIndex, lastTerm
+		return lastIndex + rf.lastLogInitialIndex + 1, lastTerm
 	}
-	return -1, -1
+	return rf.getLastInitialIndexAndTerm()
+}
+
+func (rf *Raft) getLastInitialIndexAndTerm() (int, int) {
+	return rf.lastLogInitialIndex, rf.lastLogInitialTerm
 }
 
 //
@@ -104,4 +136,39 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+type SnapshotArgs struct {
+	Term            int
+	InitialLogIndex int
+	InitialLogTerm  int
+	ServerData      []byte
+}
+
+type SnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) sendSnapshot(server int, args *SnapshotArgs, reply *SnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
+func (rf *Raft) InstallSnapshot(args *SnapshotArgs, reply *SnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.becomeFollower(args.Term)
+	}
+	rf.lastLogInitialIndex = args.InitialLogIndex
+	rf.lastLogInitialTerm = args.InitialLogTerm
+	rf.lastApplied = args.InitialLogIndex
+	rf.commitIndex = args.InitialLogIndex
+	rf.log = rf.log[0:0]
+	rf.persister.SaveStateAndSnapshot(rf.getRaftData(), args.ServerData)
+	rf.applyCh <- ApplyMsg{ReadSnapshotFromPersister: true, CommandValid: false}
 }

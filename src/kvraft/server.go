@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"mylabs/src/raft"
@@ -35,18 +36,30 @@ type Result struct {
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
+	mu        sync.Mutex
+	me        int
+	rf        *raft.Raft
+	applyCh   chan raft.ApplyMsg
+	persister *raft.Persister
+	dead      int32 // set by Kill()
 
-	data        map[string]string
+	data        map[string]string   // the key-value store of this service
 	idToChannel map[int]chan Result // after submitting a command, which channel to watch on
-	ack         map[int64]int64
+	ack         map[int64]int64     // map of client id to last serviced request id
 
 	maxraftstate int // snapshot if log grows this big
 
+}
+
+// Check whether we need to snapshot.
+func (kv *KVServer) needToSnapshot() bool {
+	if kv.maxraftstate == -1 {
+		return false
+	}
+	if kv.persister.RaftStateSize() >= int(0.9*float32(kv.maxraftstate)) {
+		return true
+	}
+	return false
 }
 
 func (kv *KVServer) GetLeaderAndTerm(args *GetLeaderArgs, reply *GetLeaderReply) {
@@ -68,6 +81,7 @@ func (kv *KVServer) processOp(op Op) (Result, Err) {
 	if !isLeader {
 		return Result{}, ErrWrongLeader
 	}
+	kv.dlog("Submitted op %+v to leader, got index as %d", op, expectedIndex)
 
 	kv.mu.Lock()
 	targetChannel, ok = kv.idToChannel[expectedIndex]
@@ -185,6 +199,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
 	// You may need initialization code here.
 	kv.data = make(map[string]string)
@@ -195,6 +210,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.readPersist(kv.persister.ReadSnapshot())
 	go kv.watchForApplyCh()
 
 	return kv
@@ -207,18 +223,30 @@ func (kv *KVServer) watchForApplyCh() {
 		select {
 		case msg := <-kv.applyCh:
 			kv.mu.Lock()
-			op := msg.Command.(Op)
-			result := kv.applyOp(op)
-			result.ApplyMsg = msg
-			channel, present := kv.idToChannel[msg.CommandIndex]
-			if present {
-				// If this applyCh message comes in after RPC handler of the same request times out,
-				// then no one is listening on this channel and this statement will block.
-				// Need to provide a default case for this scenario.
-				select {
-				case channel <- result:
-				default:
+			if msg.CommandValid {
+				op := msg.Command.(Op)
+				result := kv.applyOp(op)
+				kv.dlog("Received op %+v on index %d", op, msg.CommandIndex)
+				result.ApplyMsg = msg
+				channel, present := kv.idToChannel[msg.CommandIndex]
+				if present {
+					// If this applyCh message comes in after RPC handler of the same request times out,
+					// then no one is listening on this channel and this statement will block.
+					// Need to provide a default case for this scenario.
+					select {
+					case channel <- result:
+					default:
+					}
 				}
+				if kv.needToSnapshot() {
+					kv.dlog("Saving snapshot from %d onwards", msg.CommandIndex)
+					kv.rf.SaveSnapshot(kv.getPersistData(), msg.CommandIndex)
+				}
+			} else if msg.ReadSnapshotFromPersister {
+				// Possibly Raft peer has got the new snapshot from leader and is
+				// sending the data store for this KVServer to update itself.
+				kv.dlog("reading persisted data")
+				kv.readPersist(kv.persister.ReadSnapshot())
 			}
 			kv.mu.Unlock()
 		}
@@ -246,15 +274,44 @@ func (kv *KVServer) applyOp(op Op) Result {
 	switch op.OpType {
 	case GetOp:
 		result.ResultValue = oldval
-	default:
-		if kv.dedup(op) {
-			return result
-		}
-		if op.OpType == PutOp {
+	case PutOp:
+		if !kv.dedup(op) {
 			kv.data[op.Key] = op.Value
-		} else {
+		}
+	case AppendOp:
+		if !kv.dedup(op) {
 			kv.data[op.Key] = oldval + op.Value
 		}
+	default:
+		panic("unhandled OpType")
 	}
 	return result
+}
+
+func (kv *KVServer) getPersistData() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.ack)
+	e.Encode(kv.data)
+	data := w.Bytes()
+	return data
+}
+
+func (kv *KVServer) readPersist(data []byte) {
+	var ack map[int64]int64
+	var kvdata map[string]string
+
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	if d.Decode(&ack) != nil || d.Decode(&kvdata) != nil  {
+		panic("Decoding error..")
+	} else {
+		kv.ack = ack
+		kv.data = kvdata
+	}
 }

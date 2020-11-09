@@ -46,8 +46,9 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-}
 
+	ReadSnapshotFromPersister bool
+}
 
 //
 // A Go object implementing a single Raft peer.
@@ -61,9 +62,11 @@ type Raft struct {
 	applyCh   chan<- ApplyMsg     // to notify tester that this Raft peer has committed a log entry
 
 	// Persistent Raft state on all servers
-	currentTerm int
-	votedFor    int
-	log         []Log
+	currentTerm         int
+	votedFor            int
+	log                 []Log
+	lastLogInitialIndex int
+	lastLogInitialTerm  int
 
 	// Volatile state on all servers
 	commitIndex        int
@@ -108,7 +111,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return lastIndex, lastTerm, true
 }
 
-
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -132,6 +134,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.lastApplied = -1
 	rf.commitIndex = -1
+	rf.lastLogInitialIndex = -1
+	rf.lastLogInitialTerm = -1
 	rf.electionResetEvent = time.Now()
 
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -145,13 +149,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-
 // Expect rf.mu to be Locked
 func (rf *Raft) startLeader() {
 	rf.state = Leader
 
 	for peer := range rf.peers {
-		rf.nextIndex[peer] = len(rf.log)
+		rf.nextIndex[peer] = len(rf.log) + rf.lastLogInitialIndex + 1
 		rf.matchIndex[peer] = -1
 	}
 	rf.dlog("becomes Leader; term=%d, log=%v", rf.currentTerm, rf.log)
@@ -161,11 +164,11 @@ func (rf *Raft) startLeader() {
 	// The tester (config.go:L194) can't deal with this condition, it expects
 	// all logs to be continous, starting from index 1. So, we'll just add a log
 	// in case leader starts with empty log.
-	if len(rf.log) == 0 {
+	if len(rf.log)+rf.lastLogInitialIndex+1 == 0 {
 		rf.log = append(rf.log, Log{
 			Command: nil,
-			Term: rf.currentTerm,
-			Noop: true,
+			Term:    rf.currentTerm,
+			Noop:    true,
 		})
 		rf.persist()
 	}
@@ -178,7 +181,7 @@ func (rf *Raft) startLeader() {
 			<-ticker.C
 
 			rf.mu.Lock()
-			if rf.state != Leader || rf.killed(){
+			if rf.state != Leader || rf.killed() {
 				rf.mu.Unlock()
 				return
 			}
@@ -201,19 +204,49 @@ func (rf *Raft) sendHeartbeats() {
 		go func(id int) {
 			var entries []Log
 			var prevLogIndex, prevLogTerm int
-			prevLogIndex = -1
-			prevLogTerm = -1
+			var needToInstallSnapshot bool = false
 			// in each heartbeat, figure out the new log entries and add them
 			// need to lock the rf.mu Lock to read these entries
 			rf.mu.Lock()
+			prevLogIndex, prevLogTerm = rf.getLastInitialIndexAndTerm()
 			ni := rf.nextIndex[id]
 			leaderCommit := rf.commitIndex
-			entries = rf.log[ni:]
-			if ni > 0 {
+			im := rf.lastLogInitialIndex + 1
+			if ni-im >= 0 {
+				// heartbeat possible
+				entries = rf.log[ni-im:]
+			} else {
+				// need to install snapshot
+				needToInstallSnapshot = true
+			}
+			if ni > im {
 				prevLogIndex = ni - 1
-				prevLogTerm = rf.log[prevLogIndex].Term
+				prevLogTerm = rf.log[prevLogIndex-im].Term
 			}
 			rf.mu.Unlock()
+
+			if needToInstallSnapshot {
+				// If this is the case of a new member joining or a lagging peer catching up,
+				// leader needs to install the snapshot on it to reset it.
+				rf.mu.Lock()
+				args := SnapshotArgs{
+					InitialLogIndex: rf.lastLogInitialIndex,
+					InitialLogTerm:  rf.lastLogInitialTerm,
+					ServerData:      rf.persister.ReadSnapshot(),
+					Term:            rf.currentTerm,
+				}
+				rf.mu.Unlock()
+				var reply SnapshotReply
+				rf.dlog("Sending out snapshot to peer %d", id)
+				if ok := rf.sendSnapshot(id, &args, &reply); !ok {
+					rf.dlog("Failed to send Snapshot RPC")
+				} else {
+					rf.mu.Lock()
+					rf.nextIndex[id] = args.InitialLogIndex + 1
+					rf.mu.Unlock()
+				}
+				return
+			}
 
 			args := AppendEntriesArgs{
 				Term:         savedTerm,
@@ -231,36 +264,39 @@ func (rf *Raft) sendHeartbeats() {
 				if reply.Term > savedTerm {
 					rf.becomeFollower(reply.Term)
 				}
+				im := rf.lastLogInitialIndex + 1
+				// After getting the reply, we may have done a snapshot and hence
+				// rf.log , initial index might have changed.
 				if rf.state == Leader && reply.Term == savedTerm {
 					if reply.Success {
 						rf.nextIndex[id] = ni + len(entries)
 						rf.matchIndex[id] = rf.nextIndex[id] - 1
 						savedCommit := rf.commitIndex
-						for i := savedCommit + 1; i < len(rf.log); i++ {
+						for i := savedCommit + 1 - im; i>=0 && i < len(rf.log); i++ {
 							if rf.log[i].Term == savedTerm {
 								matches := 1
 								for peer := range rf.peers {
 									if peer == rf.id {
 										continue
 									}
-									if rf.matchIndex[peer] >= i {
+									if rf.matchIndex[peer] >= i + im {
 										matches++
 									}
 								}
 								if matches*2 > len(rf.peers) {
-									rf.dlog("setting leader commitIndex to %d", i)
-									rf.commitIndex = i
+									rf.dlog("setting leader commitIndex to %d", i + im)
+									rf.commitIndex = i + im
 								}
 							}
 						}
 					} else {
-						// Optmization mentioned on Page 8 of the paper.
+						// Optimization mentioned on Page 8 of the paper.
 						if reply.ConflictTerm == -1 {
 							rf.nextIndex[id] = reply.ConflictIndex
 						} else {
 							var lastIndexTerm int = -1
-							for i := len(rf.log) - 1; i >= 0; i-- {
-								if rf.log[i].Term == reply.ConflictTerm {
+							for i := len(rf.log) - 1 + im; i >= 0; i-- {
+								if rf.log[i-im].Term == reply.ConflictTerm {
 									lastIndexTerm = i
 									break
 								}
@@ -296,13 +332,16 @@ func (rf *Raft) updateApplyChan() {
 			rf.mu.Unlock()
 			continue
 		}
-		// some committed entries need to be sent
-
-		logCopy := rf.log[rf.lastApplied+1 : rf.commitIndex+1]
+		// Some committed entries need to be sent.
+		im := rf.lastLogInitialIndex + 1
+		rf.dlog("need to send out some entries on applyCh, from %d to %d, im = %d lastApplied %d commitIndex %d " +
+			"len %d",rf.lastApplied+1-im , rf.commitIndex+1-im, im, rf.lastApplied, rf.commitIndex, len(rf.log))
+		logCopy := rf.log[rf.lastApplied+1-im : rf.commitIndex+1-im]
 		rf.dlog("sending out entries %+v on applyCh", logCopy)
 		lastAppliedIndex := rf.lastApplied + 1
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
+
 		for index, entry := range logCopy {
 			if entry.Noop {
 				continue
