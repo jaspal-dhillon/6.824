@@ -164,7 +164,7 @@ func (rf *Raft) startLeader() {
 	// The tester (config.go:L194) can't deal with this condition, it expects
 	// all logs to be continous, starting from index 1. So, we'll just add a log
 	// in case leader starts with empty log.
-	if len(rf.log)+rf.lastLogInitialIndex+1 == 0 {
+	if len(rf.log) == 0 && rf.lastLogInitialIndex == -1 {
 		rf.log = append(rf.log, Log{
 			Command: nil,
 			Term:    rf.currentTerm,
