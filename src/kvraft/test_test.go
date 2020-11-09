@@ -1,7 +1,7 @@
 package kvraft
 
-import "../porcupine"
-import "../models"
+import "mylabs/src/porcupine"
+import "mylabs/src/models"
 import "testing"
 import "strconv"
 import "time"
@@ -39,7 +39,7 @@ func Append(cfg *config, ck *Clerk, key string, value string) {
 func check(cfg *config, t *testing.T, ck *Clerk, key string, value string) {
 	v := Get(cfg, ck, key)
 	if v != value {
-		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
+		t.Fatalf("GetOp(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
 }
 
@@ -142,7 +142,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 	}
 }
 
-// Basic test is as follows: one or more clients submitting Append/Get
+// Basic test is as follows: one or more clients submitting Append/GetOp
 // operations to set of servers for some period of time.  After the period is
 // over, test checks that all appended values are present and in order for a
 // particular key.  If unreliable is set, RPCs may fail.  If crash is set, the
@@ -534,7 +534,7 @@ func TestOnePartition3A(t *testing.T) {
 	case <-done0:
 		t.Fatalf("Put in minority completed")
 	case <-done1:
-		t.Fatalf("Get in minority completed")
+		t.Fatalf("GetOp in minority completed")
 	case <-time.After(time.Second):
 	}
 
@@ -561,7 +561,7 @@ func TestOnePartition3A(t *testing.T) {
 	select {
 	case <-done1:
 	case <-time.After(30 * 100 * time.Millisecond):
-		t.Fatalf("Get did not complete")
+		t.Fatalf("GetOp did not complete")
 	default:
 	}
 

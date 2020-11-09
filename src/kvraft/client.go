@@ -1,13 +1,23 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"labrpc"
+	"math/big"
+	"sync/atomic"
+	"time"
+)
 
+const (
+	GetRPCName       = "KVServer.Get"
+	PutAppendRPCName = "KVServer.PutAppend"
+)
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers       []*labrpc.ClientEnd
+	currentLeader int
+	clientID      int64
+	lastRequestID int64
 }
 
 func nrand() int64 {
@@ -17,11 +27,30 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) nextRequestId() int64 {
+	return atomic.AddInt64(&ck.lastRequestID, 1)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.currentLeader = -1
+	ck.clientID = nrand()
 	return ck
+}
+
+func (ck *Clerk) findTermAndLeader() {
+	var getLeaderReply GetLeaderReply
+	for {
+		for i, _ := range ck.servers {
+			ok := ck.servers[i].Call("KVServer.GetLeaderAndTerm", &GetLeaderArgs{}, &getLeaderReply)
+			if ok && getLeaderReply.Err == OK {
+				ck.currentLeader = i
+				return
+			}
+		}
+		time.Sleep(time.Millisecond * 500)
+	}
 }
 
 //
@@ -37,9 +66,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	args := GetArgs{
+		Key:       key,
+		RequestID: ck.nextRequestId(),
+		ClientID:  ck.clientID,
+	}
+	var reply GetReply
+	ck.makeRPC(GetRPCName, &args, &reply)
+	return reply.Value
 }
 
 //
@@ -53,7 +87,15 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		RequestID: ck.nextRequestId(),
+		ClientID:  ck.clientID,
+	}
+	var reply PutAppendReply
+	ck.makeRPC(PutAppendRPCName, &args, &reply)
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -61,4 +103,31 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) makeRPC(rpcName string, args interface{}, reply interface{}) {
+	if ck.currentLeader == -1 {
+		ck.findTermAndLeader()
+	}
+	for {
+		var err Err = OK
+		ok := ck.servers[ck.currentLeader].Call(rpcName, args, reply)
+		if ok {
+			switch rpcName {
+			case GetRPCName:
+				val := reply.(*GetReply)
+				err = val.Err
+			case PutAppendRPCName:
+				val := reply.(*PutAppendReply)
+				err = val.Err
+			}
+			if err == OK {
+				return
+			}
+		}
+		if !ok || err != OK {
+			ck.dlog("RPC %s failed with err=%+v ok = %v, will find leader and try again", rpcName, err, ok)
+			ck.findTermAndLeader()
+		}
+	}
 }
