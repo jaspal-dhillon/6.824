@@ -295,7 +295,7 @@ func (rf *Raft) sendHeartbeats() {
 							rf.nextIndex[id] = reply.ConflictIndex
 						} else {
 							var lastIndexTerm int = -1
-							for i := len(rf.log) - 1 + im; i >= 0; i-- {
+							for i := len(rf.log) - 1 + im; i - im >= 0; i-- {
 								if rf.log[i-im].Term == reply.ConflictTerm {
 									lastIndexTerm = i
 									break
